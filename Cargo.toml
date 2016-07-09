@@ -5,3 +5,4 @@ authors = ["chansuke <moonset20@gmail.com>"]
 
 [dependencies]
 mio = { git = "https://github.com/carllerche/mio" }
+http-muncher = "0.2.0"
