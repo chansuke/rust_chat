@@ -80,42 +80,42 @@ impl WebSocketClient {
             })))
         }
     }
+}
 
-    fn write(&mut self) {
-        let headers = self.headers.borrow();
-        let response_key = gen_key(&headers.get("Sec-WebSocket-Key").unwrap());
-        let response = fmt::format(format_args!("HTTP/1.1 101 Switching Protocols\r\n\
-                                                 Connection: Upgrade\r\n\
-                                                 Sec-WebSocket-Accept: {}\r\n\
-                                                 Upgrade: websocket\r\n\r\n", response_key));
-        self.socket.try_write(response.as_bytes()).unwrap();
+fn write(&mut self) {
+    let headers = self.headers.borrow();
+    let response_key = gen_key(&headers.get("Sec-WebSocket-Key").unwrap());
+    let response = fmt::format(format_args!("HTTP/1.1 101 Switching Protocols\r\n\
+                                             Connection: Upgrade\r\n\
+                                             Sec-WebSocket-Accept: {}\r\n\
+                                             Upgrade: websocket\r\n\r\n", response_key));
+    self.socket.try_write(response.as_bytes()).unwrap();
 
-        // Change the state
-        self.state = ClientState::Connected;
+    // Change the state
+    self.state = ClientState::Connected;
 
-        self.interest.remove(EventSet::writable());
-        self.interest.insert(EventSet::readable());
+    self.interest.remove(EventSet::writable());
+    self.interest.insert(EventSet::readable());
+}
+
+fn read(&mut self) {
+    match self.state {
+        ClientState::AwaitingHandshake(ref parser_state) => {
+            self.read_handshake(parser_state);
+        },
+        _ => {}
     }
+}
 
-    fn read(&mut self) {
-        match self.state {
-            ClientState::AwaitingHandshake(ref parser_state) => {
-                self.read_handshake();
-            },
-            _ => {}
-        }
-    }
+fn read_handshake(&mut self) {
+    let is_upgrade = if let ClientState::AwaitingHandshake(ref parser_state) = self.state {
+        let mut parser = parser_state.borrow_mut();
+        parser.parse(&buf);
+        parser.is_upgrade()
+    } else { false };
 
-    fn read_handshake(&mut self) {
-        let is_upgrade = if let ClientState::AwaitingHandshake(ref parser_state) = self.state {
-            let mut parser = parser_state.borrow_mut();
-            parser.parse(&buf);
-            parser.is_upgrade()
-        } else { false };
-
-        if is_upgrade {
-            self.state = ClientState::HandshakeResponse;
-        }
+    if is_upgrade {
+        self.state = ClientState::HandshakeResponse;
     }
 }
 
