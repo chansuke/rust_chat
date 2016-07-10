@@ -2,6 +2,9 @@ extern crate mio;
 extern crate http_muncher;
 extern crate sha1;
 extern crate rustc_serialize;
+extern crate byteorder;
+
+mod frame;
 
 use std::collections::HashMap;
 use std::cell::RefCell;
@@ -14,8 +17,8 @@ use mio::tcp::*;
 use http_muncher::{Parser, ParserHandler};
 use rustc_serialize::base64::{ToBase64, STANDARD};
 
-//generate key for handshake
-//https://tools.ietf.org/html/rfc6455#section-4
+use frame::WebSocketFrame;
+
 fn gen_key(key: &String) -> String {
     let mut m = sha1::Sha1::new();
     let mut buf = [0u8; 20];
@@ -29,8 +32,8 @@ fn gen_key(key: &String) -> String {
 }
 
 struct HttpParser {
-  current_key: Option<String>,
-  headers: Rc<RefCell<HashMap<String, String>>>
+    current_key: Option<String>,
+    headers: Rc<RefCell<HashMap<String, String>>>
 }
 
 impl ParserHandler for HttpParser {
@@ -51,7 +54,6 @@ impl ParserHandler for HttpParser {
     }
 }
 
-#[derive(PartialEq)]
 enum ClientState {
     AwaitingHandshake(RefCell<Parser<HttpParser>>),
     HandshakeResponse,
@@ -61,7 +63,6 @@ enum ClientState {
 struct WebSocketClient {
     socket: TcpStream,
     headers: Rc<RefCell<HashMap<String, String>>>,
-    http_parser: Parser<HttpParser>,
     interest: EventSet,
     state: ClientState
 }
@@ -80,42 +81,69 @@ impl WebSocketClient {
             })))
         }
     }
-}
 
-fn write(&mut self) {
-    let headers = self.headers.borrow();
-    let response_key = gen_key(&headers.get("Sec-WebSocket-Key").unwrap());
-    let response = fmt::format(format_args!("HTTP/1.1 101 Switching Protocols\r\n\
-                                             Connection: Upgrade\r\n\
-                                             Sec-WebSocket-Accept: {}\r\n\
-                                             Upgrade: websocket\r\n\r\n", response_key));
-    self.socket.try_write(response.as_bytes()).unwrap();
+    fn write(&mut self) {
+        let headers = self.headers.borrow();
+        let response_key = gen_key(&headers.get("Sec-WebSocket-Key").unwrap());
+        let response = fmt::format(format_args!("HTTP/1.1 101 Switching Protocols\r\n\
+                                                 Connection: Upgrade\r\n\
+                                                 Sec-WebSocket-Accept: {}\r\n\
+                                                 Upgrade: websocket\r\n\r\n", response_key));
+        self.socket.try_write(response.as_bytes()).unwrap();
 
-    // Change the state
-    self.state = ClientState::Connected;
+        // Change the state
+        self.state = ClientState::Connected;
 
-    self.interest.remove(EventSet::writable());
-    self.interest.insert(EventSet::readable());
-}
-
-fn read(&mut self) {
-    match self.state {
-        ClientState::AwaitingHandshake(ref parser_state) => {
-            self.read_handshake(parser_state);
-        },
-        _ => {}
+        self.interest.remove(EventSet::writable());
+        self.interest.insert(EventSet::readable());
     }
-}
 
-fn read_handshake(&mut self) {
-    let is_upgrade = if let ClientState::AwaitingHandshake(ref parser_state) = self.state {
-        let mut parser = parser_state.borrow_mut();
-        parser.parse(&buf);
-        parser.is_upgrade()
-    } else { false };
+    fn read(&mut self) {
+        match self.state {
+            ClientState::AwaitingHandshake(_) => {
+                self.read_handshake();
+            },
+            ClientState::Connected => {
+                let frame = WebSocketFrame::read(&mut self.socket);
+                match frame {
+                    Ok(frame) => println!("{:?}", frame),
+                    Err(e) => println!("error while reading frame: {}", e)
+                }
+            },
+            _ => {}
+        }
+    }
 
-    if is_upgrade {
-        self.state = ClientState::HandshakeResponse;
+    fn read_handshake(&mut self) {
+        loop {
+            let mut buf = [0; 2048];
+            match self.socket.try_read(&mut buf) {
+                Err(e) => {
+                    println!("Error while reading socket: {:?}", e);
+                    return
+                },
+                Ok(None) =>
+                    // Socket buffer has got no more bytes.
+                    break,
+                Ok(Some(len)) => {
+                    let is_upgrade = if let ClientState::AwaitingHandshake(ref parser_state) = self.state {
+                        let mut parser = parser_state.borrow_mut();
+                        parser.parse(&buf);
+                        parser.is_upgrade()
+                    } else { false };
+
+                    if is_upgrade {
+                        // Change the current state
+                        self.state = ClientState::HandshakeResponse;
+
+                        // Change current interest to `Writable`
+                        self.interest.remove(EventSet::readable());
+                        self.interest.insert(EventSet::writable());
+                        break;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -132,57 +160,58 @@ impl Handler for WebSocketServer {
     type Message = ();
 
     fn ready(&mut self, event_loop: &mut EventLoop<WebSocketServer>, token: Token, events: EventSet) {
-      if events.is_readable() {
-        match token {
-          SERVER_TOKEN => {
-            let client_socket = match self.socket.accept() {
-              Ok(Some((sock, addr))) => sock,
-              Ok(None) => unreachable!(),
-              Err(e) => {
-                  println!("Accept error: {}", e);
-                  return;
-              }
-            };
+        if events.is_readable() {
+            match token {
+                SERVER_TOKEN => {
+                    let client_socket = match self.socket.accept() {
+                        Ok(Some((sock, addr))) => sock,
+                        Ok(None) => unreachable!(),
+                        Err(e) => {
+                            println!("Accept error: {}", e);
+                            return;
+                        }
+                    };
 
-            let new_token = Token(self.token_counter);
-            self.clients.insert(new_token, WebSocketClient::new(client_socket));
-            self.token_counter += 1;
+                    let new_token = Token(self.token_counter);
+                    self.clients.insert(new_token, WebSocketClient::new(client_socket));
+                    self.token_counter += 1;
 
-            event_loop.register(&self.clients[&new_token].socket, new_token, EventSet::readable(),
-                          PollOpt::edge() | PollOpt::oneshot()).unwrap();
-          },
-          token => {
+                    event_loop.register(&self.clients[&new_token].socket, new_token, EventSet::readable(),
+                                        PollOpt::edge() | PollOpt::oneshot()).unwrap();
+                },
+	        token => {
                     let mut client = self.clients.get_mut(&token).unwrap();
                     client.read();
                     event_loop.reregister(&client.socket, token, client.interest,
                                           PollOpt::edge() | PollOpt::oneshot()).unwrap();
-          }
+                }
+            }
         }
-      }
-      if events.is_writable() {
-           let mut client = self.clients.get_mut(&token).unwrap();
-           client.write();
-           event_loop.reregister(&client.socket, token, client.interest,
-                                 PollOpt::edge() | PollOpt::oneshot()).unwrap();
-      }
-   }
+
+        if events.is_writable() {
+            let mut client = self.clients.get_mut(&token).unwrap();
+            client.write();
+            event_loop.reregister(&client.socket, token, client.interest,
+                                  PollOpt::edge() | PollOpt::oneshot()).unwrap();
+        }
+    }
 }
 
 fn main() {
-  let address = "0.0.0.0:10000".parse::<SocketAddr>().unwrap();
-  let server_socket = TcpListener::bind(&address).unwrap();
+    let address = "0.0.0.0:10000".parse::<SocketAddr>().unwrap();
+    let server_socket = TcpListener::bind(&address).unwrap();
 
-  let mut event_loop = EventLoop::new().unwrap();
+    let mut event_loop = EventLoop::new().unwrap();
 
-  let mut server = WebSocketServer{
-    token_counter: 1,
-    clients: HashMap::new(),
-    socket: server_socket
-  };
+    let mut server = WebSocketServer {
+        token_counter: 1,
+        clients: HashMap::new(),
+        socket: server_socket
+    };
 
-  event_loop.register(&server.socket,
-                    SERVER_TOKEN,
-                    EventSet::readable(),
-                    PollOpt::edge()).unwrap();
-  event_loop.run(&mut server).unwrap();
+    event_loop.register(&server.socket,
+                        SERVER_TOKEN,
+                        EventSet::readable(),
+                        PollOpt::edge()).unwrap();
+    event_loop.run(&mut server).unwrap();
 }
