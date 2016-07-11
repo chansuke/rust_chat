@@ -26,6 +26,28 @@ pub struct WebSocketFrame {
     pub payload: Vec<u8>
 }
 
+impl WebSocketFrameHeader {
+    fn new_header(len: usize, opcode: OpCode) -> WebSocketFrameHeader {
+        WebSocketFrameHeader {
+            fin: true,
+            rsv1: false, rsv2: false, rsv3: false,
+            masked: false,
+            payload_length: Self::determine_len(len),
+            opcode: opcode
+        }
+    }
+
+    fn determine_len(len: usize) -> u8 {
+        if len < (PAYLOAD_LEN_U16 as usize) {
+            len as u8
+        } else if len < (u16::MAX as usize) {
+            PAYLOAD_LEN_U16
+        } else {
+            PAYLOAD_LEN_U64
+        }
+    }
+}
+
 impl WebSocketFrame {
     pub fn read<R: Read>(input: &mut R) -> IOResult<WebSocketFrame> {
         let mut buf = [0u8; 2];
