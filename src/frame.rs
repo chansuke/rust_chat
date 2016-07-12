@@ -2,15 +2,15 @@ use std::io;
 use std::io::Result as IOResult;
 use std::io::{Read, Write};
 use std::error::Error;
+use std::u16;
 
-use byteorder::{ReadBytesExt, BigEndian};
+use byteorder::{ReadBytesExt, WriteBytesExt, BigEndian};
 
 const FRAME_LEN_U16: u8 = 126;
 const FRAME_LEN_U64: u8 = 127;
 
+#[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
-#[derive(Debug)]
-
 enum OpCode {
     TextFrame = 1,
     BinaryFrame = 2,
@@ -19,6 +19,8 @@ enum OpCode {
     Pong = 0xA
 }
 
+#[allow(dead_code)]
+#[derive(Debug)]
 pub struct WebSocketFrameHeader {
     fin: bool,
     rsv1: bool,
@@ -56,28 +58,6 @@ pub struct WebSocketFrame {
     header: WebSocketFrameHeader,
     mask: Option<[u8; 4]>,
     pub payload: Vec<u8>
-}
-
-impl WebSocketFrameHeader {
-    fn new_header(len: usize, opcode: OpCode) -> WebSocketFrameHeader {
-        WebSocketFrameHeader {
-            fin: true,
-            rsv1: false, rsv2: false, rsv3: false,
-            masked: false,
-            payload_length: Self::determine_len(len),
-            opcode: opcode
-        }
-    }
-
-    fn determine_len(len: usize) -> u8 {
-        if len < (FRAME_LEN_U16 as usize) {
-            len as u8
-        } else if len < (u16::MAX as usize) {
-            FRAME_LEN_U16
-        } else {
-            FRAME_LEN_U64
-        }
-    }
 }
 
 impl<'a> From<&'a [u8]> for WebSocketFrame {
@@ -139,7 +119,7 @@ impl WebSocketFrame {
         })
     }
 
-     fn serialize_header(hdr: &WebSocketFrameHeader) -> u16 {
+    fn serialize_header(hdr: &WebSocketFrameHeader) -> u16 {
         let b1 = ((hdr.fin as u8) << 7)
                   | ((hdr.rsv1 as u8) << 6)
                   | ((hdr.rsv2 as u8) << 5)
@@ -152,15 +132,16 @@ impl WebSocketFrame {
         ((b1 as u16) << 8) | (b2 as u16)
     }
 
-    fn parse_header(buf: [u8; 2]) -> WebSocketFrameHeader {
+    fn parse_header(buf: u16) -> WebSocketFrameHeader {
         WebSocketFrameHeader {
-            fin: buf[0] & 0x80 == 0x80,
-            rsv1: buf[0] & 0x40 == 0x40,
-            rsv2: buf[0] & 0x20 == 0x20,
-            rsv3: buf[0] & 0x10 == 0x10,
-            opcode: buf[0] & 0x0F,
-            masked: buf[1] & 0x80 == 0x80,
-            payload_length: buf[1] & 0x7F,
+            fin: (buf >> 8) & 0x80 == 0x80,
+            rsv1: (buf >> 8) & 0x40 == 0x40,
+            rsv2: (buf >> 8) & 0x20 == 0x20,
+            rsv3: (buf >> 8) & 0x10 == 0x10,
+            opcode: ((buf >> 8) as u8) & 0x0F,
+
+            masked: buf & 0x80 == 0x80,
+            payload_length: (buf as u8) & 0x7F,
         }
     }
 
@@ -183,7 +164,7 @@ impl WebSocketFrame {
         Ok(payload)
     }
 
-    fn read_length<R: Read>(payload_len: u8, input: &mut R) -> Result<usize, io::Error> {
+    fn read_length<R: Read>(payload_len: u8, input: &mut R) -> IOResult<usize> {
         return match payload_len {
             FRAME_LEN_U64 => input.read_u64::<BigEndian>().map(|v| v as usize).map_err(|e| io::Error::from(e)),
             FRAME_LEN_U16 => input.read_u16::<BigEndian>().map(|v| v as usize).map_err(|e| io::Error::from(e)),
