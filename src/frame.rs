@@ -1,6 +1,6 @@
 use std::io;
 use std::io::Result as IOResult;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::error::Error;
 
 use byteorder::{ReadBytesExt, BigEndian};
@@ -10,6 +10,15 @@ const FRAME_LEN_U64: u8 = 127;
 
 #[allow(dead_code)]
 #[derive(Debug)]
+
+enum OpCode {
+    TextFrame = 1,
+    BinaryFrame = 2,
+    ConnectionClose = 8,
+    Ping = 9,
+    Pong = 0xA
+}
+
 pub struct WebSocketFrameHeader {
     fin: bool,
     rsv1: bool,
@@ -20,9 +29,32 @@ pub struct WebSocketFrameHeader {
     payload_length: u8
 }
 
+impl WebSocketFrameHeader {
+    fn new_header(len: usize, opcode: u8) -> WebSocketFrameHeader {
+        WebSocketFrameHeader {
+            fin: true,
+            rsv1: false, rsv2: false, rsv3: false,
+            masked: false,
+            payload_length: Self::determine_len(len),
+            opcode: opcode
+        }
+    }
+
+    fn determine_len(len: usize) -> u8 {
+        if len < (FRAME_LEN_U16 as usize) {
+            len as u8
+        } else if len < (u16::MAX as usize) {
+            FRAME_LEN_U16
+        } else {
+            FRAME_LEN_U64
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct WebSocketFrame {
     header: WebSocketFrameHeader,
+    mask: Option<[u8; 4]>,
     pub payload: Vec<u8>
 }
 
@@ -38,20 +70,53 @@ impl WebSocketFrameHeader {
     }
 
     fn determine_len(len: usize) -> u8 {
-        if len < (PAYLOAD_LEN_U16 as usize) {
+        if len < (FRAME_LEN_U16 as usize) {
             len as u8
         } else if len < (u16::MAX as usize) {
-            PAYLOAD_LEN_U16
+            FRAME_LEN_U16
         } else {
-            PAYLOAD_LEN_U64
+            FRAME_LEN_U64
+        }
+    }
+}
+
+impl<'a> From<&'a [u8]> for WebSocketFrame {
+    fn from(payload: &[u8]) -> WebSocketFrame {
+        WebSocketFrame {
+            header: WebSocketFrameHeader::new_header(payload.len(), OpCode::BinaryFrame as u8),
+            payload: Vec::from(payload),
+            mask: None
+        }
+    }
+}
+
+impl<'a> From<&'a str> for WebSocketFrame {
+    fn from(payload: &str) -> WebSocketFrame {
+        WebSocketFrame {
+            header: WebSocketFrameHeader::new_header(payload.len(), OpCode::TextFrame as u8),
+            payload: Vec::from(payload),
+            mask: None
         }
     }
 }
 
 impl WebSocketFrame {
+    pub fn write<W: Write>(&self, output: &mut W) -> IOResult<()> {
+        let hdr = Self::serialize_header(&self.header);
+        try!(output.write_u16::<BigEndian>(hdr));
+
+        match self.header.payload_length {
+            FRAME_LEN_U16 => try!(output.write_u16::<BigEndian>(self.payload.len() as u16)),
+            FRAME_LEN_U64 => try!(output.write_u64::<BigEndian>(self.payload.len() as u64)),
+            _ => {}
+        }
+
+        try!(output.write(&self.payload));
+        Ok(())
+    }
+
     pub fn read<R: Read>(input: &mut R) -> IOResult<WebSocketFrame> {
-        let mut buf = [0u8; 2];
-        try!(input.read(&mut buf));
+        let buf = try!(input.read_u16::<BigEndian>());
         let header = Self::parse_header(buf);
 
         let len = try!(Self::read_length(header.payload_length, input));
@@ -69,8 +134,22 @@ impl WebSocketFrame {
 
         Ok(WebSocketFrame {
             header: header,
-            payload: payload
+            payload: payload,
+            mask: mask_key
         })
+    }
+
+     fn serialize_header(hdr: &WebSocketFrameHeader) -> u16 {
+        let b1 = ((hdr.fin as u8) << 7)
+                  | ((hdr.rsv1 as u8) << 6)
+                  | ((hdr.rsv2 as u8) << 5)
+                  | ((hdr.rsv3 as u8) << 4)
+                  | ((hdr.opcode as u8) & 0x0F);
+
+        let b2 = ((hdr.masked as u8) << 7)
+            | ((hdr.payload_length as u8) & 0x7F);
+
+        ((b1 as u16) << 8) | (b2 as u16)
     }
 
     fn parse_header(buf: [u8; 2]) -> WebSocketFrameHeader {
@@ -87,7 +166,7 @@ impl WebSocketFrame {
 
     fn apply_mask(mask: [u8; 4], bytes: &mut Vec<u8>) {
         for (idx, c) in bytes.iter_mut().enumerate() {
-            *c = mask[idx % 4];
+            *c = *c ^ mask[idx % 4];
         }
     }
 
