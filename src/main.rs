@@ -142,7 +142,8 @@ impl WebSocketClient {
                     },
                     Err(e) => println!("error while reading frame: {}", e)
                 }
-            }
+            },
+            _ => {}
         }
     }
 
