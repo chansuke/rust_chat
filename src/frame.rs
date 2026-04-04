@@ -158,9 +158,15 @@ impl WebSocketFrame {
     }
 
     fn read_payload<R: Read>(payload_len: usize, input: &mut R) -> IOResult<Vec<u8>> {
-        let mut payload: Vec<u8> = Vec::with_capacity(payload_len);
-        unsafe { payload.set_len(payload_len) };
-        try!(input.read(&mut payload));
+        const MAX_PAYLOAD: usize = 65_536; // 64 KiB limit to prevent OOM
+        if payload_len > MAX_PAYLOAD {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("payload length {} exceeds limit of {} bytes", payload_len, MAX_PAYLOAD),
+            ));
+        }
+        let mut payload = vec![0u8; payload_len];
+        input.read_exact(&mut payload)?;
         Ok(payload)
     }
 

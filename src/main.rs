@@ -109,6 +109,18 @@ impl WebSocketClient {
 
     fn write_handshake(&mut self) {
         let headers = self.headers.borrow();
+
+        // Validate Origin to prevent Cross-Site WebSocket Hijacking (CSWSH)
+        let allowed_origin = std::env::var("ALLOWED_ORIGIN")
+            .unwrap_or_else(|_| "http://localhost".to_string());
+        let origin = headers.get("Origin").map(|s| s.as_str()).unwrap_or("");
+        if origin != allowed_origin {
+            let response = "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n";
+            let _ = self.socket.try_write(response.as_bytes());
+            self.interest = EventSet::none();
+            return;
+        }
+
         let response_key = gen_key(&headers.get("Sec-WebSocket-Key").unwrap());
         let response = fmt::format(format_args!("HTTP/1.1 101 Switching Protocols\r\n\
                                                  Connection: Upgrade\r\n\
@@ -231,7 +243,10 @@ impl Handler for WebSocketServer {
 }
 
 fn main() {
-    let address = "0.0.0.0:10000".parse::<SocketAddr>().unwrap();
+    let bind_addr = std::env::var("BIND_ADDRESS")
+        .unwrap_or_else(|_| "127.0.0.1:10000".to_string());
+    let address = bind_addr.parse::<SocketAddr>()
+        .expect("Invalid BIND_ADDRESS");
     let server_socket = TcpListener::bind(&address).unwrap();
 
     let mut event_loop = EventLoop::new().unwrap();
